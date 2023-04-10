@@ -11,7 +11,7 @@ using System.Xml.Linq;
 
 namespace MGWDev.SPClient.Utilities.OData
 {
-    public class FilterQueryMapper
+    public class FilterQueryMapper : IExpressionMapper
     {
         public string BuildFilterQuery<T>(Expression<Func<T, bool>> predicate)
         {
