@@ -1,39 +1,40 @@
-﻿using AngleSharp.Dom;
-using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using PnP.Core.Model.SharePoint;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 using System.Text.Json.Serialization;
-using System.Threading.Tasks;
-using System.Xml.Linq;
 
 namespace MGWDev.SPClient.Utilities.OData
 {
-    public class FilterQueryMapper : IExpressionMapper
+    public class FilterQueryMapper : ExpressionVisitor, IExpressionMapper
     {
+        private readonly StringBuilder filterQuery;
+
+        public FilterQueryMapper()
+        {
+            filterQuery = new StringBuilder();
+        }
+
         public string BuildFilterQuery<T>(Expression<Func<T, bool>> predicate)
         {
             if (predicate == null)
             {
                 throw new ArgumentNullException(nameof(predicate));
             }
-
-            var filterExpression = predicate.Body;
-            var filterQuery = new StringBuilder("");
-            VisitExpression<T>(filterQuery, filterExpression);
+            CurrentType = typeof(T);
+            Visit(predicate);
             return filterQuery.ToString();
         }
-        public static bool IsPropertyOfTypeOrBase<T>(PropertyInfo property)
+
+        protected Type CurrentType { get; set; }
+
+        public bool IsPropertyOfTypeOrBase(PropertyInfo property)
         {
             if (property == null)
             {
                 throw new ArgumentNullException(nameof(property));
             }
-
-            Type currentType = typeof(T);
-
+            Type currentType = CurrentType;
             while (currentType != null)
             {
                 if (property.DeclaringType == currentType)
@@ -46,85 +47,14 @@ namespace MGWDev.SPClient.Utilities.OData
 
             return false;
         }
-        private void VisitExpression<T>(StringBuilder filterQuery, Expression expression)
+
+        protected override Expression VisitBinary(BinaryExpression node)
         {
-            if (expression is BinaryExpression binaryExpression)
-            {
-                filterQuery.Append("(");
-                VisitBinaryExpression<T>(filterQuery, binaryExpression);
-                filterQuery.Append(")");
-            }
-            else if (expression is MemberExpression memberExpression)
-            {
-                VisitMemberExpression<T>(filterQuery, memberExpression);
-            }
-            else if (expression is ConstantExpression constantExpression)
-            {
-                AppendConstantValue(filterQuery, constantExpression.Value);
-            }
-            else if (expression is UnaryExpression unaryExpression)
-            {
-                VisitExpression<T>(filterQuery, unaryExpression.Operand);
-            }
-            else
-            {
-                throw new NotSupportedException($"Unsupported expression type: {expression.GetType()}");
-            }
-        }
+            filterQuery.Append("(");
 
-        protected virtual void VisitMemberExpression<T>(StringBuilder filterQuery, MemberExpression memberExpression)
-        {
-            if (memberExpression.Member is PropertyInfo property)
-            {
-                if (IsPropertyOfTypeOrBase<T>(property))
-                {
-                    var jsonPropertyNameAttribute = property.GetCustomAttribute<JsonPropertyNameAttribute>();
-                    filterQuery.Append(jsonPropertyNameAttribute?.Name ?? property.Name);
-                }
-                else if (memberExpression.Expression is not null && memberExpression.Expression.NodeType == ExpressionType.MemberAccess)
-                {
-                    VisitExpression<T>(filterQuery, memberExpression.Expression);
-                    filterQuery.Append("/");
-                    var jsonPropertyNameAttribute = property.GetCustomAttribute<JsonPropertyNameAttribute>();
-                    filterQuery.Append(jsonPropertyNameAttribute?.Name ?? property.Name);
-                }
-                else
-                {
-                    var lambda = Expression.Lambda(memberExpression);
-                    var compiledValue = lambda.Compile().DynamicInvoke();
-                    if (property.PropertyType == typeof(DateTime))
-                    {
-                        filterQuery.Append("'");
-                        filterQuery.Append(((DateTime)compiledValue).ToString("yyyy-MM-ddTHH:mm:ss.fffffff"));
-                        filterQuery.Append("'");
-                    }
-                    else
-                    {
-                        filterQuery.Append(compiledValue.ToString());
-                    }
-                }
-            }
-            else if (memberExpression.Member.MemberType == MemberTypes.Field && memberExpression.Expression is ConstantExpression constantExpression)
-            {
-                var fieldInfo = (FieldInfo)memberExpression.Member;
-                var fieldValue = fieldInfo.GetValue(constantExpression.Value);
+            Visit(node.Left);
 
-                if (fieldValue is DateTime dateTimeValue)
-                {
-                    filterQuery.AppendFormat("'{0:yyyy-MM-ddTHH:mm:ss}'", dateTimeValue);
-                }
-                else
-                {
-                    filterQuery.Append(fieldValue);
-                }
-            }
-        }
-
-        protected virtual void VisitBinaryExpression<T>(StringBuilder filterQuery, BinaryExpression binaryExpression)
-        {
-            VisitExpression<T>(filterQuery, binaryExpression.Left);
-
-            switch (binaryExpression.NodeType)
+            switch (node.NodeType)
             {
                 case ExpressionType.Equal:
                     filterQuery.Append(" eq ");
@@ -151,13 +81,70 @@ namespace MGWDev.SPClient.Utilities.OData
                     filterQuery.Append(" or ");
                     break;
                 default:
-                    throw new NotSupportedException($"Unsupported binary operator: {binaryExpression.NodeType}");
+                    throw new NotSupportedException($"Unsupported binary operator: {node.NodeType}");
             }
 
-            VisitExpression<T>(filterQuery, binaryExpression.Right);
+            Visit(node.Right);
+
+            filterQuery.Append(")");
+
+            return node;
         }
 
-        protected virtual void AppendConstantValue(StringBuilder filterQuery, object value)
+        protected override Expression VisitConstant(ConstantExpression node)
+        {
+            AppendConstantValue(node.Value);
+
+            return node;
+        }
+
+        protected override Expression VisitMember(MemberExpression node)
+        {
+            if (node.Member is PropertyInfo property)
+            {
+                if (IsPropertyOfTypeOrBase(property))
+                {
+                    var jsonPropertyNameAttribute = property.GetCustomAttribute<JsonPropertyNameAttribute>();
+                    filterQuery.Append(jsonPropertyNameAttribute?.Name ?? property.Name);
+                }
+                else if (node.Expression is not null)
+                {
+                    Visit(node.Expression);
+                    filterQuery.Append("/");
+                    var jsonPropertyNameAttribute = property.GetCustomAttribute<JsonPropertyNameAttribute>();
+                    filterQuery.Append(jsonPropertyNameAttribute?.Name ?? property.Name);
+                }
+                else
+                {
+                    object value = property.GetValue(node.Member);
+                    AppendObjectToQuery(value);
+
+                }
+            }
+            else if (node.Member.MemberType == MemberTypes.Field && node.Expression is ConstantExpression constantExpression)
+            {
+                var fieldInfo = (FieldInfo)node.Member;
+                var fieldValue = fieldInfo.GetValue(constantExpression.Value);
+
+                AppendObjectToQuery(fieldValue);
+            }
+
+            return node;
+        }
+
+        private void AppendObjectToQuery(object? fieldValue)
+        {
+            if (fieldValue is DateTime dateTimeValue)
+            {
+                filterQuery.AppendFormat("'{0:yyyy-MM-ddTHH:mm:ss}'", dateTimeValue);
+            }
+            else
+            {
+                filterQuery.Append(fieldValue);
+            }
+        }
+
+        protected virtual void AppendConstantValue(object value)
         {
             if (value == null)
             {

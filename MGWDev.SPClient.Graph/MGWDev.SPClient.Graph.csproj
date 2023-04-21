@@ -14,4 +14,8 @@
     <ProjectReference Include="..\MGWDev.SPClient\MGWDev.SPClient.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="PageService\" />
+  </ItemGroup>
+
 </Project>
